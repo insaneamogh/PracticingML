@@ -2,11 +2,11 @@
 
 # 1. Variables and Data Types
 # Variables store data. Python is dynamically typed.
-name = "Alice"         # str (string)
+        # str (string)
 age = 30               # int (integer)
 height = 1.65          # float
 is_student = False     # bool (boolean)
-
+name = "tom"  # Reassigning variable
 print("Variables and Data Types:")
 print(f"name: {name}, age: {age}, height: {height}, is_student: {is_student}\n")
 
