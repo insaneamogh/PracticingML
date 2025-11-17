@@ -1,175 +1,207 @@
-# PracticingML
-public with sharing class AF_MeetingNoteActionRunner {
-   
-        public static final String OPPORTUNITY = 'Opportunity';
-        public static final String OWNER_ID = 'OwnerId';
-        public static final String STAGE_NAME = 'StageName';
-        public static final String STAGE_PRE_DISCOVERY = 'Pre-Discovery';
-        public static final String LEGACY_ID = 'AF_Legacy_ID__c';
-        public static final String LEGACY_ID_VAL = 'Agentforce';
-        public static final String LEAD_SOURCE = 'LeadSource';
-        public static final String LEAD_SOURCE_OTHER = 'Other';
-        public static final String CLOSE_DATE = 'CloseDate';
+import { LightningElement, api, wire, track } from 'lwc';
+import askAgentInvocable from '@salesforce/apex/AF_AgentInvocationService.AF_InvokeAgent';
+import getMeetingNoteActionReviewDetails from '@salesforce/apex/AF_MeetingNoteActionHandler.getMeetingNoteActionReviewDetails';
+import getUserNameById from '@salesforce/apex/AF_TaskManageAction.getUserNameById';
+import getTask from '@salesforce/apex/AF_TaskDataController.getTask';
+import { subscribe } from 'lightning/empApi';
+import { refreshApex } from '@salesforce/apex';
+import runAction from '@salesforce/apex/AF_MeetingNoteActionRunner.runAction';
+import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 
-        public static final String TASK = 'Task';
-        public static final String RECORD_TYPE_ID = 'RecordTypeId';
-        public static final String TASK_DEV_NAME = 'Advisory_Task';
-        public static final String TYPE = 'Type';
-        public static final String TYPE_TODO = 'To Do';
-        public static final String STATUS = 'Status';
-        public static final String STATUS_NOT_STARTED = 'Not Started';
-        public static final String WHAT_ID = 'WhatId';
-        public static final String WHO_ID = 'WhoId';
- 
+import cardTitle from '@salesforce/label/c.af_card_title';
+import pageIntro from '@salesforce/label/c.af_page_intro';
+import createFollowup from '@salesforce/label/c.af_create_followup_button';
+import reviewTitle from '@salesforce/label/c.af_review_title';
+import submitLabel from '@salesforce/label/c.af_submit';
+import successHeadingLabel from '@salesforce/label/c.af_success_heading';
+import successLink from '@salesforce/label/c.af_success_link';
+import errorAgent from '@salesforce/label/c.af_error_parse_agent';
+import noRecommendationTitle from '@salesforce/label/c.af_no_recommendation_title';
+import noRecommendation from '@salesforce/label/c.af_no_recommendation';
+import errorAgentFailed from '@salesforce/label/c.af_error_agent_failed';
 
-    @AuraEnabled
-    public static Map<String, Object> runAction(String objectApiName, Map<String, Object> fieldValues, String taskId, String actionId) {
-        Map<String, Object> result = new Map<String, Object>();
+export default class AFAgentforceFollowUpActions extends LightningElement {
+    @api recordId;
+    @track task;
+    @track error;
+    description = '';
+    response;
+    @api channelName = '/event/Task_Updated__e';
+    @track isLoading = false;
+    wiredTaskData;
+
+    @track actionReviews = [];
+    @track showReviewScreen = false;
+    @track showNoRecommendations = false;
+    @track createdRecordLabel;
+    @track createdRecordId;
+    @track submitSuccess = false;
+    @track submitError;
+
+    // Custom Labels
+    cardTitle = cardTitle;
+    pageIntro = pageIntro;
+    createFollowup = createFollowup;
+    reviewTitle = reviewTitle;
+    submitLabel = submitLabel;
+    successLink = successLink;
+    noRecommendationTitle = noRecommendationTitle;
+    noRecommendation = noRecommendation;
+    errorAgent = errorAgent;
+    errorAgentFailed = errorAgentFailed;
+
+    get successHeading() {
+        return successHeadingLabel.replace('{0}', this.createdRecordLabel || '');
+    }
+
+    get createdRecordUrl() {
+        return this.createdRecordId ? `/${this.createdRecordId}` : '#';
+    }
+
+    @wire(getTask, { recordId: '$recordId', description : '$description' })
+    wiredTask({ error, data }) {
+        this.wiredTaskData = data;
+        if (data) {
+            this.task = data;
+            this.description = data.Description || '';
+        } else if (error) {
+            this.error = error;
+        }
+    }
+
+    // Helper: Converts YYYY-MM-DD to MM-DD-YYYY
+    formatDateForDisplay(val) {
+        if (!val) return '';
+        if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
+            const [year, month, day] = val.split('-');
+            return `${month}-${day}-${year}`;
+        }
+        return val;
+    }
+
+    // Decorate each field: add .uiValue for easy template display
+    async decorateFieldsForDisplay(fields) {
+        return Promise.all(fields.map(async f => {
+            const field = { ...f };
+            // Optionally replace OwnerId with user name
+            if (field.name === 'OwnerId' && field.value) {
+                field.name = 'Assigned To';
+                try {
+                    const userName = await getUserNameById({ userId: field.value });
+                    field.value = userName;
+                } catch (e) { /* ignore */ }
+            }
+            // If it's a date type or field name/label has 'date', format it
+            if (
+                (field.type && field.type.toLowerCase() === 'date') ||
+                (field.apiName && field.apiName.toLowerCase().includes('date')) ||
+                (field.label && field.label.toLowerCase().includes('date'))
+            ) {                
+                field.displayValue = this.formatDateForDisplay(field.value);
+            }
+            // Always set .uiValue to display in template
+            field.uiValue = field.displayValue || field.value;
+            return field;
+        }));
+    }
+
+    invokeAgentforce() {
+        this.submitSuccess = false;
+        this.submitError = undefined;
+        this.createdRecordLabel = undefined;
+        this.createdRecordId = undefined;
+        this.showReviewScreen = false;
+        this.showNoRecommendations = false;
+        refreshApex(this.wiredTaskData);
+        this.isLoading = true;
+
+        askAgentInvocable({ taskId: this.recordId, prompt: this.description })
+            .then(res => {
+                let parsedObj = res;
+                if (typeof parsedObj === 'string') {
+                    try {
+                        parsedObj = JSON.parse(parsedObj);
+                    } catch (e) {
+                        this.response = 'Agentforce response could not be parsed.';
+                        this.isLoading = false;
+                        return;
+                    }
+                }
+                this.response = parsedObj && parsedObj.value ? parsedObj.value : 'Agent did not respond as expected.';
+
+                return getMeetingNoteActionReviewDetails({ taskId: this.recordId });
+            })
+            .then(async result => {
+                if (result && result.length > 0) {
+                    this.actionReviews = await Promise.all(result.map(async ar => ({
+                        ...ar,
+                        fields: await this.decorateFieldsForDisplay(ar.fields)
+                    })));
+                    this.showReviewScreen = true;
+                    this.showNoRecommendations = false;
+                } else {
+                    this.actionReviews = [];
+                    this.showReviewScreen = false;
+                    this.showNoRecommendations = true;
+                }
+                this.isLoading = false;
+            })
+            .catch(err => {
+                this.isLoading = false;
+                this.response = 'Failed to fetch review details or Agentforce call failed: ' + (err.body?.message || err.message || err);
+                this.showReviewScreen = false;
+                this.showNoRecommendations = false;
+                console.error('Error in invokeAgentforce:', err);
+            });
+    }
+
+    // This method is called on click of submit button
+    async handleSubmit(event) {
+        const idx = event.target.dataset.index;
+        const actionReview = this.actionReviews[idx];
+        if (!actionReview) return;
+
+        const fields = {};
+        actionReview.fields.forEach(fld => {
+            fields[fld.apiName] = fld.value !== '' && fld.value !== undefined ? fld.value : null;
+        });
+
+        const objectApiName = actionReview.action.AF_Object_Name__c;
+        const actionId = actionReview.action.id;
+        this.submitError = undefined;
+        this.isLoading = true;
+
         try {
-            SObjectType sobjectType = Schema.getGlobalDescribe().get(objectApiName);
-            SObject newObj = sobjectType.newSObject();
-            Map<String, SObjectField> fieldMap = sobjectType.getDescribe().fields.getMap();
+            const result = await runAction({
+                objectApiName: objectApiName,
+                fieldValues: fields,
+                taskId: this.recordId,
+                actionId: actionId
+            });
 
-            populateSObjectFields(newObj, fieldMap, fieldValues);
-
-            /*if (objectApiName == OPPORTUNITY) {
-                setOpportunityDefaults(newObj, fieldMap, fieldValues);
-            } else if (objectApiName == TASK) {
-                setTaskDefaults(newObj, fieldMap, fieldValues, taskId);
-            }*/
-
-            insert newObj;
-            result.put('objectLabel', sobjectType.getDescribe().getLabel());
-            result.put('recordId', newObj.Id);
-            result.put('errorMessage', null);
-
-            if (! String.isBlank(actionId)) {
-                cleanupActionAndChildren(actionId, result);
+            if (result.errorMessage) {
+                this.submitError = result.errorMessage;
+                this.submitSuccess = false;
+            } else {
+                this.createdRecordLabel = result.objectLabel;
+                this.createdRecordId = result.recordId;
+                this.submitSuccess = true;
             }
-        } catch (Exception e) {
-            result.put('objectLabel', null);
-            result.put('recordId', null);
-            result.put('errorMessage', e.getMessage());
+
+        } catch (error) {
+            this.submitError = error.body ? error.body.message : error.message;
+            this.submitSuccess = false;
         }
-        return result;
+
+        this.isLoading = false;
     }
 
-    // Populates SObject fields per provided map and converts types appropriately
-    private static void populateSObjectFields(SObject newObj, Map<String, SObjectField> fieldMap, Map<String, Object> fieldValues) {
-        for (String field : fieldValues.keySet()) {
-            Object val = fieldValues.get(field);
-            if (!fieldMap.containsKey(field)) {
-                continue;
-            }
-            Schema.DisplayType type = fieldMap.get(field).getDescribe().getType();
-            if (val != null) {
-                switch on type {
-                    when DATE {
-                        if (val instanceof String) {
-                            newObj.put(field, Date.valueOf((String)val));
-                        } else {
-                            newObj.put(field, val);
-                        }
-                    }
-                    when DATETIME {
-                        if (val instanceof String) {
-                            newObj.put(field, DateTime.valueOf((String)val));
-                        } else {
-                            newObj.put(field, val);
-                        }
-                    }
-                    when BOOLEAN {
-                        if (val instanceof String) {
-                            newObj.put(field, ((String)val).toLowerCase() == 'true');
-                        } else if (val instanceof Boolean) {
-                            newObj.put(field, val);
-                        }
-                    }
-                    when INTEGER, DOUBLE, CURRENCY, PERCENT {
-                        if (val instanceof String) {
-                            newObj.put(field, Decimal.valueOf((String)val));
-                        } else {
-                            newObj.put(field, val);
-                        }
-                    }
-                    when else {
-                        newObj.put(field, val);
-                    }
-                }
-            }
-        }
+    connectedCallback() {
+        subscribe(this.channelName, -1, () => { this.refreshMyData(); })
+            .then(response => { })
+            .catch(err => { });
     }
-
-    // Sets Opportunity-specific defaults
-   /* private static void setOpportunityDefaults(SObject newObj, Map<String, SObjectField> fieldMap, Map<String, Object> fieldValues) {
-        if (!fieldValues.containsKey( OWNER_ID) && fieldMap.containsKey( OWNER_ID)) {
-            newObj.put( OWNER_ID, UserInfo.getUserId());
-        }
-        if (!fieldValues.containsKey(STAGE_NAME) && fieldMap.containsKey(STAGE_NAME)) {
-            newObj.put(STAGE_NAME, STAGE_PRE_DISCOVERY);
-        }
-        if (!fieldValues.containsKey(LEGACY_ID) && fieldMap.containsKey(LEGACY_ID)) {
-            newObj.put(LEGACY_ID, LEGACY_ID_VAL);
-        }
-        if (!fieldValues.containsKey(LEAD_SOURCE) && fieldMap.containsKey(LEAD_SOURCE)) {
-            newObj.put(LEAD_SOURCE, LEAD_SOURCE_OTHER);
-        }
-         System.debug('Checking close date conditions: fieldValues.containsKey=' + fieldValues.containsKey(CLOSE_DATE) + 
-                 ', fieldValues.get=' + fieldValues.get(CLOSE_DATE) +
-                 ', fieldMap.containsKey=' + fieldMap.containsKey(CLOSE_DATE));
-        if ((!fieldValues.containsKey(CLOSE_DATE) || fieldValues.get(CLOSE_DATE) == null)
-            && fieldMap.containsKey(CLOSE_DATE)
-        ) {
-             Date defaultCloseDate = Date.today().addDays(90);
-            newObj.put(CLOSE_DATE, defaultCloseDate);
-            System.debug('Defaulting close date to ' + defaultCloseDate);
-        }else{
-        System.debug('Not defaulting close date');
-        }
-    }*/
-
-    // Sets Task-specific defaults and copies WhatId/WhoId from source if taskId provided
-    private static void setTaskDefaults(SObject newObj, Map<String, SObjectField> fieldMap, Map<String, Object> fieldValues, String taskId) {
-        if (!fieldValues.containsKey(RECORD_TYPE_ID) && fieldMap.containsKey(RECORD_TYPE_ID)) {
-            RecordType rt = [SELECT Id FROM RecordType WHERE SObjectType = :TASK AND DeveloperName = :TASK_DEV_NAME LIMIT 1];
-            newObj.put(RECORD_TYPE_ID, rt.Id);
-        }
-        /*if (!fieldValues.containsKey(TYPE) && fieldMap.containsKey(TYPE)) {
-            newObj.put(TYPE, TYPE_TODO);
-        }
-        if (!fieldValues.containsKey(STATUS) && fieldMap.containsKey(STATUS)) {
-            newObj.put(STATUS, STATUS_NOT_STARTED);
-        }*/
-
-        if (String.isNotBlank(taskId)) {
-            try {
-                Task origTask = [SELECT WhatId, WhoId FROM Task WHERE Id = :taskId LIMIT 1];
-                if (!fieldValues.containsKey(WHAT_ID) && fieldMap.containsKey(WHAT_ID) && origTask.WhatId != null) {
-                    newObj.put(WHAT_ID, origTask.WhatId);
-                }
-                if (!fieldValues.containsKey(WHO_ID) && fieldMap.containsKey(WHO_ID) && origTask.WhoId != null) {
-                    newObj.put(WHO_ID, origTask.WhoId);
-                }
-            } catch (Exception ex) {
-                System.debug(LoggingLevel.ERROR, 'Error retrieving original task: ' + ex.getMessage());            }
-        }
-    }
-
-    // Cleans up actions and children, with error handling
-    private static void cleanupActionAndChildren(String actionId, Map<String, Object> result) {
-        try {
-            List<AF_Meeting_Note_Action_Data__c> childrenToDelete = [
-                SELECT Id FROM AF_Meeting_Note_Action_Data__c WHERE AF_Meeting_Note_Action__c = :actionId
-            ];
-            if (!childrenToDelete.isEmpty()) {
-                delete childrenToDelete;
-            }
-            AF_Meeting_Note_Action__c actionToDelete = [
-                SELECT Id FROM AF_Meeting_Note_Action__c WHERE Id = :actionId LIMIT 1
-            ];
-            delete actionToDelete;
-        } catch (Exception deleteEx) {
-            result.put('deleteWarning', deleteEx.getMessage());
-        }
+    refreshMyData(){
+        refreshApex(this.wiredTask).then(() =>{});
     }
 }
