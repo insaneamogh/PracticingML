@@ -186,6 +186,21 @@ export default class AFAgentforceFollowUpActions extends LightningElement {
                 this.createdRecordLabel = result.objectLabel;
                 this.createdRecordId = result.recordId;
                 this.submitSuccess = true;
+
+                // Show sticky toast notification at the top
+                const toastEvent = new ShowToastEvent({
+                    title: 'Success!',
+                    message: `${this.createdRecordLabel} has been created. {0}`,
+                    messageData: [
+                        {
+                            url: this.createdRecordUrl,
+                            label: `View ${this.createdRecordLabel}`
+                        }
+                    ],
+                    variant: 'success',
+                    mode: 'sticky'
+                });
+                this.dispatchEvent(toastEvent);
             }
 
         } catch (error) {
