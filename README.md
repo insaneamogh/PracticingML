@@ -112,18 +112,43 @@ export default class AFAgentforceFollowUpActions extends LightningElement {
         this.createdRecordId = undefined;
         this.showReviewScreen = false;
         this.showNoRecommendations = false;
+        
+        // Refresh task data to get current description
         refreshApex(this.wiredTaskData);
         this.isLoading = true;
 
-        askAgentInvocable({ taskId: this.recordId, prompt: this.description })
+        // Get fresh task data first to ensure we have current description
+        getTask({ recordId: this.recordId, description: '' })
+            .then(taskData => {
+                const currentDescription = taskData?.Description || '';
+                
+                // Validate if description/prompt exists
+                if (!currentDescription || currentDescription.trim() === '') {
+                    this.isLoading = false;
+                    this.actionReviews = [];
+                    this.showReviewScreen = false;
+                    this.showNoRecommendations = true;
+                    return;
+                }
+
+                // Update local description with fresh data
+                this.description = currentDescription;
+
+                // Call agent with current description
+                return askAgentInvocable({ taskId: this.recordId, prompt: currentDescription });
+            })
             .then(res => {
+                if (!res) return; // Skip if no response (description was empty)
+                
                 let parsedObj = res;
                 if (typeof parsedObj === 'string') {
                     try {
                         parsedObj = JSON.parse(parsedObj);
                     } catch (e) {
-                        this.response = 'Agentforce response could not be parsed.';
+                        this.response = this.errorAgent || 'Agentforce response could not be parsed.';
                         this.isLoading = false;
+                        this.showReviewScreen = false;
+                        this.showNoRecommendations = false;
                         return;
                     }
                 }
@@ -132,6 +157,8 @@ export default class AFAgentforceFollowUpActions extends LightningElement {
                 return getMeetingNoteActionReviewDetails({ taskId: this.recordId });
             })
             .then(async result => {
+                if (!result) return; // Skip if no result from previous step
+                
                 if (result && result.length > 0) {
                     this.actionReviews = await Promise.all(result.map(async ar => ({
                         ...ar,
@@ -148,7 +175,7 @@ export default class AFAgentforceFollowUpActions extends LightningElement {
             })
             .catch(err => {
                 this.isLoading = false;
-                this.response = 'Failed to fetch review details or Agentforce call failed: ' + (err.body?.message || err.message || err);
+                this.response = this.errorAgentFailed || 'Failed to fetch review details or Agentforce call failed: ' + (err.body?.message || err.message || err);
                 this.showReviewScreen = false;
                 this.showNoRecommendations = false;
                 console.error('Error in invokeAgentforce:', err);
