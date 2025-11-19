@@ -1,82 +1,48 @@
+@isTest
+private class AF_MeetingNoteActionRunner_Test {
 
-invokeAgentforce() {
-    this.submitSuccess = false;
-    this.submitError = undefined;
-    this.createdRecordLabel = undefined;
-    this.createdRecordId = undefined;
-    this.isLoading = true;
+@isTest
+static void testRunActionAndCleanup_Task() {
 
-    // Reset UI states
-    this.showNoRecommendations = false;
-    this.response = null;
-    this.actionReviews = [];
-    this.showReviewScreen = false;
+// Create temp action record
+AF_Meeting_Note_Action__c tempAction = new AF_Meeting_Note_Action__c(
+Name = 'Test Temp Action',
+AF_Status__c = 'Pending'
+);
+insert tempAction;
 
-    askAgentInvocable({
-        taskId: this.recordId,
-        prompt: this.description,
-        agent: 'Advisor_Agent'
-    })
-    .then(res => {
-        let parsedObj = res;
+// Prepare fieldValues required to create Task
+Map<String, Object> fieldValues = new Map<String, Object>{
+'Subject' => 'Follow-up Task',
+'Status' => 'Not Started'
+};
 
-        // Safely parse if response is a string (common with Agentforce)
-        if (typeof parsedObj === 'string') {
-            try {
-                parsedObj = JSON.parse(parsedObj);
-            } catch (e) {
-                this.response = errorParseAgent;
-                this.isLoading = false;
-                console.error('JSON Parse Error:', e);
-                return;
-            }
-        }
+Test.startTest();
+Map<String, Object> result = AF_MeetingNoteActionRunner.runAction(
+'Task',
+fieldValues,
+null,
+tempAction.Id
+);
+Test.stopTest();
 
-        const aiResponse = parsedObj?.value;
+String createdRecordId = (String) result.get('recordId');
+System.assertNotEquals(null, createdRecordId);
 
-        // CHECK FOR NO ACTIONS / EMPTY RESPONSE
-        const hasActions = aiResponse && (
-            (Array.isArray(aiResponse) && aiResponse.length > 0) ||
-            (aiResponse.actions && Array.isArray(aiResponse.actions) && aiResponse.actions.length > 0) ||
-            (typeof aiResponse === 'object' && Object.keys(aiResponse).length > 0) ||
-            (typeof aiResponse === 'string' && aiResponse.trim() !== '')
-        );
+// Validate task created
+Task t = [SELECT Id, Subject FROM Task WHERE Id = :createdRecordId LIMIT 1];
+System.assertEquals('Follow-up Task', t.Subject);
 
-        if (!hasActions) {
-            // NO ACTIONS → Show friendly message
-            this.showNoRecommendations = true;
-            this.isLoading = false;
-            return; // Skip fetching reviews — nothing to show
-        }
+// Validate cleanup updates
+AF_Meeting_Note_Action__c updatedAction = [
+SELECT AF_Status__c, AF_Created_Follow_Up_Action__c, AF_Type__c
+FROM AF_Meeting_Note_Action__c
+WHERE Id = :tempAction.Id
+LIMIT 1
+];
 
-        // HAS ACTIONS → Store and proceed
-        this.response = aiResponse;
-        this.showNoRecommendations = false;
-
-        console.log('Agentforce Response:', this.response);
-
-        // Now fetch any existing reviews (optional but good UX)
-        return getMeetingNoteActionReviewDetails({ taskId: this.recordId });
-    })
-    .then(async result => {
-        if (result) {
-            this.actionReviews = await Promise.all((result || []).map(async ar => ({
-                ...ar,
-                fields: await this.decorateFieldsForDisplay(ar.fields)
-            })));
-        }
-        this.showReviewScreen = true;
-        this.isLoading = false;
-    })
-    .catch(err => {
-        // Any error in agent call OR review fetch
-        this.isLoading = false;
-        this.showNoRecommendations = false;
-        this.response = null;
-
-        const errorMsg = err?.body?.message || err?.message || err;
-        this.response = errorAgentFailed + (errorMsg ? ` ${errorMsg}` : '');
-
-        console.error('Agentforce or Review Fetch Failed:', err);
-    });
+System.assertEquals('Saved Successfully', updatedAction.AF_Status__c);
+System.assertEquals(createdRecordId, updatedAction.AF_Created_Follow_Up_Action__c);
+System.assertEquals('Task', updatedAction.AF_Type__c); // REQUIRED
+}
 }
